@@ -65,7 +65,7 @@ describe('executeWithRetries', async () => {
     vi.clearAllMocks()
     mockContext.triggerMetadata = {
       messageId: 'test-message-id',
-      enqueuedTimeUtc: new Date().toISOString(),
+      enqueuedTimeUtc: '2024-01-01T00:00:00.000',
       someOhterProperty: 'test'
     }
   })
@@ -75,7 +75,7 @@ describe('executeWithRetries', async () => {
     await retryHandler(message, mockContext)
 
     expect(handler).toHaveBeenCalledWith(message, mockContext)
-    expect(mockContext.originalBindingData).toMatchObject({messageId: 'test-message-id', enqueuedTimeUtc: '2024-01-01T00:00:00.000Z',})
+    expect(mockContext.originalBindingData).toMatchObject({messageId: 'test-message-id', enqueuedTimeUtc: '2024-01-01T00:00:00.000',})
     expect(mockContext.publishCount).toBe(1)
     expect(mockSender.scheduleMessages).not.toHaveBeenCalled()
   })
@@ -91,7 +91,7 @@ describe('executeWithRetries', async () => {
         body: {
           message: {test: 'data'},
           publishCount: 2,
-          originalBindingData: {messageId: 'test-message-id', enqueuedTimeUtc: '2024-01-01T00:00:00.000Z'}
+          originalBindingData: {messageId: 'test-message-id', enqueuedTimeUtc: '2024-01-01T00:00:00.000'}
         },
         scheduledEnqueueTimeUtc: new Date('2024-01-01T00:00:05Z')
       }), new Date('2024-01-01T00:00:05Z'))
@@ -136,17 +136,66 @@ describe('executeWithRetries', async () => {
     expect(mockSender.scheduleMessages).not.toHaveBeenCalled()
   })
 
-  test('Should throw error when message expired', async () => {
+  test('Should handle expired message as normal by default', async () => {
     const message = { message: 'data', 
       publishCount: 1,
       originalBindingData: {
         messageId: 'test-message-id-original',
-        expiresAtUtc: new Date('2023-12-31T23:59:59Z').toISOString(),
+        expiresAtUtc: '2023-12-31T23:59:59',
         enqueuedTimeUtc: new Date().toISOString()
       }
     }
-    handler.mockRejectedValue(new Error('Function execution failed'))
-    await expect(retryHandler(message, mockContext)).rejects.toThrow(expect.any(MessageExpiredError))
-    expect(mockSender.scheduleMessages).not.toHaveBeenCalled()
+    handler.mockResolvedValue('hello')
+    const result = await retryHandler(message, mockContext)
+    expect(result).toBe('hello')
+  })
+
+  test('Should ignore expiry message when messageExpiryStrategy is set to ignore', async () => {
+    await serviceBusQueueWithRetries('test-function', {
+        queueName: 'test-queue',
+        connection: 'test-connection',
+        handler,
+        retryConfiguration: retryConfig,
+        messageExpiryStrategy: 'ignore'
+      })
+  
+    const retryHandler = vi.mocked(app.serviceBusQueue).mock.calls[0][1].handler
+
+    const message = { message: 'data', 
+      publishCount: 1,
+      originalBindingData: {
+        messageId: 'test-message-id-original',
+        expiresAtUtc: '2023-12-31T23:59:59',
+        enqueuedTimeUtc: new Date().toISOString()
+      }
+    }
+
+    handler.mockResolvedValue('hello')
+    const result = await retryHandler(message, mockContext)
+    expect(result).not.toBeDefined()
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  test('Should throw an error when when messageExpiryStrategy is set to reject', async () => {
+    await serviceBusQueueWithRetries('test-function', {
+        queueName: 'test-queue',
+        connection: 'test-connection',
+        handler,
+        retryConfiguration: retryConfig,
+        messageExpiryStrategy: 'reject'
+      })
+  
+    const retryHandler = vi.mocked(app.serviceBusQueue).mock.calls[0][1].handler
+
+    const message = { message: 'data', 
+      publishCount: 1,
+      originalBindingData: {
+        messageId: 'test-message-id-original',
+        expiresAtUtc: '2023-12-31T23:59:59',
+        enqueuedTimeUtc: new Date().toISOString()
+      }
+    }
+
+    await expect(retryHandler(message, mockContext)).rejects.toThrow(MessageExpiredError)
   })
 })

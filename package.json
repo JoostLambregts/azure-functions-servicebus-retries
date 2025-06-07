@@ -61,6 +61,7 @@
     "test": "test"
   },
   "dependencies": {
-    "@azure/service-bus": "^7.9.5"
+    "@azure/service-bus": "^7.9.5",
+    "date-fns-tz": "^3.2.0"
   }
 }

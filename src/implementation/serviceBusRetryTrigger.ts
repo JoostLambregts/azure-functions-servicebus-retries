@@ -2,6 +2,7 @@ import { app, type FunctionHandler, type FunctionResult, type InvocationContext,
 import { type ServiceBusMessage, type ServiceBusSender, ServiceBusClient } from  '@azure/service-bus'
 import { MaxRetriesReachedError, MessageExpiredError } from '../util/error.js'
 import { calculateBackoffSeconds, type RetryConfiguration } from './backoff.js'
+import { fromZonedTime } from 'date-fns-tz'
 
 
 /**
@@ -47,9 +48,10 @@ export type ServiceBusRetryInvocationContext = InvocationContext & {
 }
 
 type TypedFunctionHandler<T, S> = (message: T, context: ServiceBusRetryInvocationContext) => FunctionResult<S>
-
+type MessageExpiryStrategy = 'ignore' | 'reject' | 'handle'
 export type ServiceBusQueueRetryFunctionOptions<T,S> = Omit<ServiceBusQueueFunctionOptions, 'handler'> & {
   retryConfiguration?: ServiceBusRetryConfiguration,
+  messageExpiryStrategy?: MessageExpiryStrategy,
   handler: TypedFunctionHandler<T, S>
 }
 
@@ -64,7 +66,7 @@ export function serviceBusQueueWithRetries<T = unknown, S = void>(name: string, 
   }
   console.log('SRBLIB: Retry configuration provided, using retryable service bus queue trigger')
   const sender = new ServiceBusClient(retryConfiguration.sendConnectionString).createSender(options.queueName)
-  const retryWrapper: FunctionHandler = async (message: T | ServiceBusRetryMessageWrapper<T>, context: InvocationContext): Promise<S | void> => executeWithRetries<T, S>(handler, message, context, sender, retryConfiguration)
+  const retryWrapper: FunctionHandler = async (message: T | ServiceBusRetryMessageWrapper<T>, context: InvocationContext): Promise<S | void> => executeWithRetries<T, S>(handler, message, context, sender, retryConfiguration, options.messageExpiryStrategy)
   const newOptions = {
     ...options,
     handler: retryWrapper,
@@ -73,7 +75,7 @@ export function serviceBusQueueWithRetries<T = unknown, S = void>(name: string, 
   return app.serviceBusQueue(name, newOptions)
 }
 
-async function executeWithRetries<T = unknown,S = void>(handler: TypedFunctionHandler<T,S>, message: T | ServiceBusRetryMessageWrapper<T>, originalContext: InvocationContext, sender: ServiceBusSender, retryConfiguration: ServiceBusRetryConfiguration): Promise<S | void> {
+async function executeWithRetries<T = unknown,S = void>(handler: TypedFunctionHandler<T,S>, message: T | ServiceBusRetryMessageWrapper<T>, originalContext: InvocationContext, sender: ServiceBusSender, retryConfiguration: ServiceBusRetryConfiguration, messageExpiryStrategy: MessageExpiryStrategy = 'handle'): Promise<S | void> {
   let unwrappedMessage: T | undefined
   const context = originalContext as ServiceBusRetryInvocationContext
   if (typeof message === 'object' && 'publishCount' in message!) {
@@ -92,7 +94,16 @@ async function executeWithRetries<T = unknown,S = void>(handler: TypedFunctionHa
     context.debug(`SRBLIB: Processing first execution of message with id: ${context.triggerMetadata?.messageId}`)
   }
 
-  throwErrorIfMessageExpired(context)
+  const isExpired = isMessageExpired(context)
+  if (isExpired) {
+    if (messageExpiryStrategy === 'reject') {
+      context.info(`Message expired for message originalId / retryId: ${context.originalBindingData.messageId} / ${context.triggerMetadata?.messageId}`)
+      throw new MessageExpiredError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
+    } else if (messageExpiryStrategy === 'ignore') {
+      context.info(`Ignoring expired message for message originalId / retryId: ${context.originalBindingData.messageId} / ${context.triggerMetadata?.messageId}`)
+      return
+    }
+  }
 
   try {
     return await handler(unwrappedMessage, context)
@@ -109,18 +120,13 @@ function throwErrorIfMaxRetriesReached(retryConfiguration: ServiceBusRetryConfig
   }
 }
 
-function throwErrorIfMessageExpired(context: ServiceBusRetryInvocationContext) {
+function isMessageExpired(context: ServiceBusRetryInvocationContext): boolean {
   if (context.originalBindingData?.expiresAtUtc == undefined) {
-    return
+    return false
   }
-  const expiry = new Date(context.originalBindingData?.expiresAtUtc)
-  if (expiry == undefined) {
-    return
-  }
-  if (expiry < new Date()) {
-    context.info(`Message expired for message originalId / retryId: ${context.originalBindingData.messageId} / ${context.triggerMetadata?.messageId}`)
-    throw new MessageExpiredError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
-  }
+  // For some reason, the expiresAtUTC date string does not have time zone information so we can't just use new Date() or parseDate()
+  const expiry = fromZonedTime(context.originalBindingData?.expiresAtUtc, 'UTC')
+  return expiry < new Date()
 }
 
 async function resendWithDelay<T>(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext, message: T, sender: ServiceBusSender) {
