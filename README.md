@@ -69,7 +69,7 @@ retryConfiguration supports the following type:
 type RetryConfiguration = {
   maxRetries: number;             // Maximum number of retry attempts
   retryStrategy?: RetryStrategy;  // Type of backoff strategy: 'fixed', 'linear' or 'exponential' (default: 'fixed')
-  delaySeconds: number;           // Initial delay in milliseconds between retries (for both strategies)
+  delaySeconds: number;           // Initial delay in seconds between retries (for both strategies)
   maxDelaySeconds?: number;       // Optional: Maximum delay for exponential backoff (to avoid too long waits)
   exponentialFactor?: number;     // Optional: Factor by which delay increases for exponential backoff (default: 2)
   linearIncreaseSeconds?: number; // Optional: Factor by which delay increases for linear backoff

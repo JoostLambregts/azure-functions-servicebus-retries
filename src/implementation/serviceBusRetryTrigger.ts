@@ -78,7 +78,7 @@ export function serviceBusQueueWithRetries<T = unknown, S = void>(name: string, 
 async function executeWithRetries<T = unknown,S = void>(handler: TypedFunctionHandler<T,S>, message: T | ServiceBusRetryMessageWrapper<T>, originalContext: InvocationContext, sender: ServiceBusSender, retryConfiguration: ServiceBusRetryConfiguration, messageExpiryStrategy: MessageExpiryStrategy = 'handle'): Promise<S | void> {
   let unwrappedMessage: T | undefined
   const context = originalContext as ServiceBusRetryInvocationContext
-  if (typeof message === 'object' && 'publishCount' in message!) {
+  if (typeof message === 'object' && message !== null && 'publishCount' in message) {
     const wrappedMessage = message as ServiceBusRetryMessageWrapper<T>
     unwrappedMessage = wrappedMessage.message
     context.publishCount = wrappedMessage.publishCount
