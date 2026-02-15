@@ -1,7 +1,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { mock } from 'vitest-mock-extended'
 import { app, ServiceBusQueueFunctionOptions } from '@azure/functions'
-import { ServiceBusSender, ServiceBusClient } from '@azure/service-bus'
+import { ServiceBusSender, ServiceBusClient, ServiceBusMessage } from '@azure/service-bus'
 import { serviceBusQueueWithRetries, ServiceBusRetryConfiguration, ServiceBusRetryInvocationContext } from '../src/implementation/serviceBusRetryTrigger.js'
 import { MessageExpiredError } from '../src/util/error.js'
 import { clearSession, getLatestScheduledTimeForLowerSequence } from '../src/implementation/sessionOrderingStore.js'
@@ -210,7 +210,7 @@ describe('executeWithRetries', async () => {
     handler.mockRejectedValue(new Error('Function execution failed'))
     await noExpiryHandler(message, mockContext)
 
-    const scheduledMessage = mockSender.scheduleMessages.mock.calls[0][0] as Record<string, unknown>
+    const scheduledMessage = mockSender.scheduleMessages.mock.calls[0][0] as ServiceBusMessage
     expect(scheduledMessage.timeToLive).toBeUndefined()
   })
 })
