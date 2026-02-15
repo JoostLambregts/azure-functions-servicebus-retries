@@ -3,6 +3,7 @@ import { type ServiceBusMessage, type ServiceBusSender, ServiceBusClient } from 
 import { MaxRetriesReachedError, MessageExpiredError } from '../util/error.js'
 import { calculateBackoffSeconds, type RetryConfiguration } from './backoff.js'
 import { fromZonedTime } from 'date-fns-tz'
+import { getLatestScheduledTimeForLowerSequence, addScheduledEntry, removeScheduledEntry } from './sessionOrderingStore.js'
 
 
 /**
@@ -16,15 +17,23 @@ import { fromZonedTime } from 'date-fns-tz'
  * @property linearIncreaseSeconds - Optional: The factor by which the delay increases for linear backoff.
  * @property jitter - Optional: The jitter factor to randomize the delay (default: 0.1).
  * @property sendConnectionString - The connection string used to send messages to the Service Bus.
+ * @property preserveSessionOrdering - Optional: Whether to preserve session ordering for retries (default: false). If true, messages will be rescheduled to ensure they are processed in sequence.
+ * @property sessionOrderingIncrementMs - Optional: The number of milliseconds to increment the scheduled time for retries when preserving session ordering (default: 1000ms). This is used to ensure that retried messages are scheduled after any existing messages with lower sequence numbers.
+ * @property preserveExpiresAt - Optional: Whether to preserve the original expiresAtUtc value when rescheduling messages (default: true). If true, the expiresAtUtc value from the original message will be used to calculate the timeToLive for retried messages, ensuring that they expire at the same time as the original message.
  */
 export type ServiceBusRetryConfiguration = RetryConfiguration & {
   sendConnectionString: string
+  preserveSessionOrdering?: boolean
+  sessionOrderingIncrementMs?: number
+  preserveExpiresAt?: boolean
 }
 
 export type ServiceBusBindingData = {
   messageId?: string
   enqueuedTimeUtc?: string
   expiresAtUtc?: string
+  sessionId?: string
+  sequenceNumber?: number
 }
 
 
@@ -43,15 +52,13 @@ export type ServiceBusRetryMessageWrapper<T> = {
 }
 
 export type ServiceBusRetryInvocationContext = InvocationContext & {
-  originalBindingData?: ServiceBusBindingData
+  originalBindingData: ServiceBusBindingData
   publishCount: number
 }
 
 type TypedFunctionHandler<T, S> = (message: T, context: ServiceBusRetryInvocationContext) => FunctionResult<S>
-type MessageExpiryStrategy = 'ignore' | 'reject' | 'handle'
 export type ServiceBusQueueRetryFunctionOptions<T,S> = Omit<ServiceBusQueueFunctionOptions, 'handler'> & {
   retryConfiguration?: ServiceBusRetryConfiguration,
-  messageExpiryStrategy?: MessageExpiryStrategy,
   handler: TypedFunctionHandler<T, S>
 }
 
@@ -66,7 +73,7 @@ export function serviceBusQueueWithRetries<T = unknown, S = void>(name: string, 
   }
   console.log('SRBLIB: Retry configuration provided, using retryable service bus queue trigger')
   const sender = new ServiceBusClient(retryConfiguration.sendConnectionString).createSender(options.queueName)
-  const retryWrapper: FunctionHandler = async (message: T | ServiceBusRetryMessageWrapper<T>, context: InvocationContext): Promise<S | void> => executeWithRetries<T, S>(handler, message, context, sender, retryConfiguration, options.messageExpiryStrategy)
+  const retryWrapper: FunctionHandler = async (message: T | ServiceBusRetryMessageWrapper<T>, context: InvocationContext): Promise<S | void> => executeWithRetries<T, S>(handler, message, context, sender, retryConfiguration)
   const newOptions = {
     ...options,
     handler: retryWrapper,
@@ -75,72 +82,126 @@ export function serviceBusQueueWithRetries<T = unknown, S = void>(name: string, 
   return app.serviceBusQueue(name, newOptions)
 }
 
-async function executeWithRetries<T = unknown,S = void>(handler: TypedFunctionHandler<T,S>, message: T | ServiceBusRetryMessageWrapper<T>, originalContext: InvocationContext, sender: ServiceBusSender, retryConfiguration: ServiceBusRetryConfiguration, messageExpiryStrategy: MessageExpiryStrategy = 'handle'): Promise<S | void> {
-  let unwrappedMessage: T | undefined
+async function executeWithRetries<T = unknown,S = void>(handler: TypedFunctionHandler<T,S>, message: T | ServiceBusRetryMessageWrapper<T>, originalContext: InvocationContext, sender: ServiceBusSender, retryConfiguration: ServiceBusRetryConfiguration): Promise<S | void> {
+  const { context, unwrappedMessage } = buildRetryInvocationContextAndMessage(originalContext, message)
+  const wrappedMessage: ServiceBusRetryMessageWrapper<T> = {
+    message: unwrappedMessage,
+    originalBindingData: context.originalBindingData,
+    publishCount: context.publishCount
+  }
+
+  const preserveSessionOrdering = retryConfiguration.preserveSessionOrdering === true && context.originalBindingData.sessionId !== undefined && context.originalBindingData.sequenceNumber !== undefined
+  const rescheduled = await rescheduleForSessionOrderingIfNeeded(context, wrappedMessage, retryConfiguration, sender)
+  if (rescheduled) {
+    return
+  }
+
+  try {
+    const result = await handler(unwrappedMessage, context)
+    if (preserveSessionOrdering) {
+      removeScheduledEntry(context.originalBindingData.sessionId!, context.originalBindingData.sequenceNumber!)
+    }
+    return result
+  } catch {
+    throwErrorIfMaxRetriesReached(retryConfiguration, context, preserveSessionOrdering)
+    await resendWithDelay(retryConfiguration, context, wrappedMessage, sender)
+  }
+}
+
+function throwErrorIfMaxRetriesReached(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext, preserveSessionOrdering: boolean): void {
+  if (context.publishCount > retryConfiguration.maxRetries) {
+    context.info(`Max retries (${retryConfiguration.maxRetries}) reached for message originalId / retryId: ${context.originalBindingData?.messageId} / ${context.triggerMetadata?.messageId}`)
+    if (preserveSessionOrdering) {
+      removeScheduledEntry(context.originalBindingData.sessionId!, context.originalBindingData.sequenceNumber!)
+    }
+    throw new MaxRetriesReachedError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
+  }
+}
+
+async function resendWithDelay<T>(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext, wrappedMessage: ServiceBusRetryMessageWrapper<T>, sender: ServiceBusSender): Promise<void>  {
+  const delaySeconds = calculateBackoffSeconds(retryConfiguration, context.publishCount - 1)
+  const scheduledTime = new Date(Date.now() + delaySeconds * 1000)
+
+  wrappedMessage.publishCount += 1
+
+  await resendMessage(retryConfiguration, context, wrappedMessage, sender, scheduledTime)
+}
+
+async function resendMessage<T>(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext, wrappedMessage: ServiceBusRetryMessageWrapper<T>, sender: ServiceBusSender, scheduledTime: Date): Promise<void>  {
+
+  const serviceBusMessage: ServiceBusMessage = {
+    body: wrappedMessage,
+    contentType: 'application/json',
+    scheduledEnqueueTimeUtc: scheduledTime,
+    sessionId: context.originalBindingData.sessionId,
+  }
+  applyTtlIfNeeded(retryConfiguration, context, serviceBusMessage)
+
+  if (retryConfiguration.preserveSessionOrdering === true && (serviceBusMessage.timeToLive === undefined || serviceBusMessage.timeToLive > 1)) {
+    addScheduledEntry(context.originalBindingData.sessionId!, context.originalBindingData.sequenceNumber!, scheduledTime)
+  }
+  context.info(`Rescheduling message. Original messageId: ${context.originalBindingData?.messageId}, tryCount: ${context.publishCount}, scheduledTime: ${scheduledTime.toISOString()}`)
+  await sender.scheduleMessages(serviceBusMessage, serviceBusMessage.scheduledEnqueueTimeUtc as Date )
+}
+
+function applyTtlIfNeeded(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext, serviceBusMessage: ServiceBusMessage): void {
+  if (retryConfiguration.preserveExpiresAt !== false && context.originalBindingData.expiresAtUtc !== undefined) {
+    const expiryDateTime = fromZonedTime(context.originalBindingData.expiresAtUtc, 'UTC')
+    const timeToLive = expiryDateTime.getTime() - Date.now()
+    if (timeToLive <= 0) {
+      if (retryConfiguration.preserveSessionOrdering === true && context.originalBindingData.sessionId !== undefined && context.originalBindingData.sequenceNumber !== undefined) {
+        removeScheduledEntry(context.originalBindingData.sessionId, context.originalBindingData.sequenceNumber)
+      }
+      throw new MessageExpiredError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
+    }
+    serviceBusMessage.timeToLive = timeToLive
+  }
+}
+
+function buildRetryInvocationContextAndMessage<T>(originalContext: InvocationContext, message: T | ServiceBusRetryMessageWrapper<T>): { context: ServiceBusRetryInvocationContext, unwrappedMessage: T } {
   const context = originalContext as ServiceBusRetryInvocationContext
+  let unwrappedMessage: T
   if (typeof message === 'object' && message !== null && 'publishCount' in message) {
-    const wrappedMessage = message as ServiceBusRetryMessageWrapper<T>
+    const wrappedMessage = message
     unwrappedMessage = wrappedMessage.message
     context.publishCount = wrappedMessage.publishCount
     context.originalBindingData = wrappedMessage.originalBindingData
     context.debug(`SRBLIB: Processing message with originalMessageId: ${wrappedMessage.originalBindingData?.messageId} and publishcount: ${wrappedMessage.publishCount}`)
   } else {
-    unwrappedMessage = message as T
+    unwrappedMessage = message
     context.publishCount = 1
-    context.originalBindingData = { messageId: context.triggerMetadata?.messageId  as string,
+    const bindingData: ServiceBusBindingData = {
+      messageId: context.triggerMetadata?.messageId as string,
       expiresAtUtc: context.triggerMetadata?.expiresAtUtc as string,
-      enqueuedTimeUtc: context.triggerMetadata?.enqueuedTimeUtc as string
+      enqueuedTimeUtc: context.triggerMetadata?.enqueuedTimeUtc as string,
     }
+    if (context.triggerMetadata?.sessionId !== undefined) {
+      bindingData.sessionId = context.triggerMetadata.sessionId as string
+    }
+    if (context.triggerMetadata?.sequenceNumber !== undefined) {
+      bindingData.sequenceNumber = context.triggerMetadata.sequenceNumber as number
+    }
+    context.originalBindingData = bindingData
     context.debug(`SRBLIB: Processing first execution of message with id: ${context.triggerMetadata?.messageId}`)
   }
+  return { context, unwrappedMessage }
+}
 
-  const isExpired = isMessageExpired(context)
-  if (isExpired) {
-    if (messageExpiryStrategy === 'reject') {
-      context.info(`Message expired for message originalId / retryId: ${context.originalBindingData.messageId} / ${context.triggerMetadata?.messageId}`)
-      throw new MessageExpiredError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
-    } else if (messageExpiryStrategy === 'ignore') {
-      context.info(`Ignoring expired message for message originalId / retryId: ${context.originalBindingData.messageId} / ${context.triggerMetadata?.messageId}`)
-      return
+async function rescheduleForSessionOrderingIfNeeded<T>(context: ServiceBusRetryInvocationContext, wrappedMessage: ServiceBusRetryMessageWrapper<T>, retryConfiguration: ServiceBusRetryConfiguration, sender: ServiceBusSender): Promise<boolean>  {
+  const sessionId = context.originalBindingData.sessionId
+  const sequenceNumber = context.originalBindingData.sequenceNumber
+  const preserveOrdering = retryConfiguration.preserveSessionOrdering === true && sessionId !== undefined && sequenceNumber !== undefined
+  const incrementMs = retryConfiguration.sessionOrderingIncrementMs ?? 1000
+
+  if (preserveOrdering) {
+    const latestLower = getLatestScheduledTimeForLowerSequence(sessionId, sequenceNumber)
+    if (latestLower !== undefined && latestLower > new Date()) {
+      const scheduledTime = new Date(latestLower.getTime() + incrementMs)
+      addScheduledEntry(sessionId, sequenceNumber, scheduledTime)
+      context.info(`SRBLIB: Session ordering: rescheduling message (seq ${sequenceNumber}) after lower-sequence message scheduled at ${latestLower.toISOString()}`)
+      await resendMessage(retryConfiguration, context, wrappedMessage, sender, scheduledTime)
+      return true
     }
   }
-
-  try {
-    return await handler(unwrappedMessage, context)
-  } catch {
-    throwErrorIfMaxRetriesReached(retryConfiguration, context)
-    await resendWithDelay(retryConfiguration, context, unwrappedMessage, sender)
-  }
-}
-
-function throwErrorIfMaxRetriesReached(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext) {
-  if (context.publishCount > retryConfiguration.maxRetries) {
-    context.info(`Max retries (${retryConfiguration.maxRetries}) reached for message originalId / retryId: ${context.originalBindingData?.messageId} / ${context.triggerMetadata?.messageId}`)
-    throw new MaxRetriesReachedError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
-  }
-}
-
-function isMessageExpired(context: ServiceBusRetryInvocationContext): boolean {
-  if (context.originalBindingData?.expiresAtUtc == undefined) {
-    return false
-  }
-  // For some reason, the expiresAtUTC date string does not have time zone information so we can't just use new Date() or parseDate()
-  const expiry = fromZonedTime(context.originalBindingData?.expiresAtUtc, 'UTC')
-  return expiry < new Date()
-}
-
-async function resendWithDelay<T>(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext, message: T, sender: ServiceBusSender) {
-  const delaySeconds = calculateBackoffSeconds(retryConfiguration, context.publishCount - 1)
-  const wrappedMessage: ServiceBusRetryMessageWrapper<T> = {
-    message,
-    originalBindingData: context.originalBindingData as ServiceBusBindingData,
-    publishCount: context.publishCount + 1
-  }
-  const serviceBusMessage: ServiceBusMessage = {
-    body: wrappedMessage,
-    contentType: 'application/json',
-    scheduledEnqueueTimeUtc: new Date(Date.now() + delaySeconds * 1000),
-  }
-  context.info(`Rescheduling message. Original messageId: ${context.originalBindingData?.messageId}, tryCount: ${context.publishCount}, delay: ${delaySeconds} seconds`)
-  await sender.scheduleMessages(serviceBusMessage, serviceBusMessage.scheduledEnqueueTimeUtc as Date )
+  return false
 }

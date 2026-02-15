@@ -1,7 +1,7 @@
 # Service Bus Trigger Retry Extension
 
 ## Disclaimer
-This package was created as a temporary workaround for issue https://github.com/Azure/azure-service-bus/issues/454. I intend to maintain this package for the foreseeable future, but I am the only maintainer and as such there is a risk involved with depending on this package. If your usecase is for an important project, consider just copying the code from github.
+This package was created as a temporary workaround for issue https://github.com/Azure/azure-service-bus/issues/454. I intend to preserve this package for the foreseeable future, but I am the only preserveer and as such there is a risk involved with depending on this package. If your usecase is for an important project, consider just copying the code from github.
 
 Please read the [limitations](#limitations)
 
@@ -26,13 +26,15 @@ type ServiceBusBindingData = {
   messageId?: string
   enqueuedTimeUtc?: string
   expiresAtUtc?: string
+  sessionId?: string
+  sequenceNumber?: number
 }
 ```
 
 The message will be unwrapped by the trigger functionality before being passed to your handler function. The originalBindingData and publishCount from the wrapper will be added to the Context object passed to the handler instead, so that you do have access to it in your function code. 
 
 ## Usage
-Usage is the similar to the regular app.serviceBusQueue(), except a retryConfiguration and messageExpiryStrategy is added. Additionally, the function optionally accepts type parameters to specify the message type and return type of your handler function. The default is `<unknown, void>`.
+Usage is the similar to the regular app.serviceBusQueue(), except a retryConfiguration is added. Additionally, the function optionally accepts type parameters to specify the message type and return type of your handler function. The default is `<unknown, void>`.
 
 A simple example would look like this:
 
@@ -48,7 +50,6 @@ serviceBusQueueWithRetries<MyMessageType, void>('flexReservationsToSteeringbox',
     delaySeconds: 60,
     sendConnectionString: 'Endpoint=sb://some-namespace.servicebus.windows.net/;SharedAccessKeyName=send;SharedAccessKey=some-key;EntityPath=some-queue',
   }
-  messageExpiryStrategy: 'ignore' // see Message expiry chapter
 })
 
 export async function handleMessage(message: MyMessageType, context: ServiceBusRetryInvocationContext): Promise<void> {
@@ -66,26 +67,39 @@ export async function handleMessage(message: MyMessageType, context: ServiceBusR
 retryConfiguration supports the following type:
 
 ``` typescript
-type RetryConfiguration = {
-  maxRetries: number;             // Maximum number of retry attempts
-  retryStrategy?: RetryStrategy;  // Type of backoff strategy: 'fixed', 'linear' or 'exponential' (default: 'fixed')
-  delaySeconds: number;           // Initial delay in seconds between retries (for both strategies)
-  maxDelaySeconds?: number;       // Optional: Maximum delay for exponential backoff (to avoid too long waits)
-  exponentialFactor?: number;     // Optional: Factor by which delay increases for exponential backoff (default: 2)
-  linearIncreaseSeconds?: number; // Optional: Factor by which delay increases for linear backoff
-  jitter?: number;                // Optional: jitter factor to randomize delay (default: 0.1)
-  sendConnectionString: string;   // Connection string for republishing messages to service bus.
+type ServiceBusRetryConfiguration = {
+  maxRetries: number;                  // Maximum number of retry attempts
+  retryStrategy?: RetryStrategy;       // Type of backoff strategy: 'fixed', 'linear' or 'exponential' (default: 'fixed')
+  delaySeconds: number;                // Initial delay in seconds between retries (for both strategies)
+  maxDelaySeconds?: number;            // Optional: Maximum delay for exponential backoff (to avoid too long waits)
+  exponentialFactor?: number;          // Optional: Factor by which delay increases for exponential backoff (default: 2)
+  linearIncreaseSeconds?: number;      // Optional: Factor by which delay increases for linear backoff
+  jitter?: number;                     // Optional: jitter factor to randomize delay (default: 0.1)
+  sendConnectionString: string;        // Connection string for republishing messages to service bus.
+  preserveExpiresAt?: boolean;         // Optional: preserve original TTL on retried messages (default: true). See Message expiry chapter.
+  preserveSessionOrdering?: boolean;   // Optional: Preserve message ordering within sessions (default: false). See Session ordering chapter.
+  sessionOrderingIncrementMs?: number; // Optional: Gap in ms between ordered session messages (default: 1000)
 }
 ```
 
 ## Message expiry
-Since each retry is a new message on Service Bus, the time to live for the message will reset. This means that it is possible that the trigger will consume a retry message even though the original has already expired. How the trigger handles this situation depends on the value of the 'messageExpiryStrategy' option provided to the trigger. 
-- 'handle': The message is passed to your handler as normal. This if the default.
-- 'ignore': The message is ignored. Note that this means that the message will not go to a DLQ, even though the message was never processed successfully
-- 'reject': An error is thrown. This option is ideal if you want expired messages to end up in a DLQ.
+Since each retry is a new message on Service Bus, the time to live for the message would normally reset, meaning retried messages could outlive the original message's intended expiry.
 
+By default (`preserveExpiresAt: true`), the library sets the `timeToLive` on rescheduled messages so that they expire at the same time as the original message. If a message has already expired at the time it would be rescheduled, a `MessageExpiredError` is thrown instead, which will cause the message to go to the DLQ.
+
+Set `preserveExpiresAt: false` to disable this behavior. When disabled, no `timeToLive` is set on rescheduled messages, meaning they will use the queue's default TTL.
+
+## Session ordering
+When sessions are enabled on a Service Bus queue, message ordering within a session matters. The retry mechanism (complete + reschedule with delay) can break this ordering because subsequent messages in the session may be processed while a failed message waits for its retry.
+
+To preserve ordering, set `preserveSessionOrdering: true` in the retry configuration. When enabled, the library tracks scheduled retry messages per session in an in-memory store. Incoming messages check whether a lower-sequence message in the same session is already scheduled for retry. If so, the incoming message is rescheduled to run after it, preserving order.
+
+Session ordering only activates when `preserveSessionOrdering` is `true` **and** the trigger metadata contains both `sessionId` and `sequenceNumber` (i.e., the queue has sessions enabled).
+
+The `sessionOrderingIncrementMs` option (default: 1000ms) controls the time gap between ordered messages when rescheduling.
+
+Note that the ordering store is in-memory and per-process. This effectively means that ordering is only preserved as long as the consuming instance does not restart. If you'd like this limitation removed, feel free to create an issue.
 
 ## Limitations
-- Sessions are not supported
 - Cardinality = many is currently not supported.
 - Messages get reposted on Service Bus wrapped in a JSON object. This is unwrapped before being passed to your handler function, but any other consumers on the queue should be modified to expect the wrapped messages.

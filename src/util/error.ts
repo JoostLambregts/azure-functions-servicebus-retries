@@ -30,6 +30,6 @@ export class MaxRetriesReachedError extends CustomError {
 
 export class MessageExpiredError extends CustomError {
   constructor (originalMessageId: string, currentMessageId: string) {
-    super(`Message expired for original messageId / current messageId: ${originalMessageId} / ${currentMessageId}`)
+    super(`Scheduled time for message is after message expiry for original messageId / current messageId: ${originalMessageId} / ${currentMessageId}`)
   }
 }
