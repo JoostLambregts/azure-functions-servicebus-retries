@@ -20,9 +20,12 @@ vi.mock('@azure/service-bus', () => ({
 
 const serviceBusClientMock = mock<ServiceBusClient>()
 const mockSender = mock<ServiceBusSender>()
-vi.mocked(ServiceBusClient).mockReturnValue(serviceBusClientMock)
-serviceBusClientMock.createSender.mockReturnValue(mockSender)
-
+vi.mocked(ServiceBusClient).mockImplementation(function() {
+  return serviceBusClientMock
+})
+serviceBusClientMock.createSender.mockImplementation(function() {
+  return mockSender
+})
 
 describe('serviceBusQueueWithRetries - no retry configuration', () => {
 
