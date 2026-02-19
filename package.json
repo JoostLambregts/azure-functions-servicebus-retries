@@ -1,6 +1,6 @@
 {
   "name": "@joost_lambregts/azure-functions-servicebus-retries",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Retry extension for Azure Functions Servicebus queue trigger",
   "type": "module",
   "main": "dist/main.cjs",
