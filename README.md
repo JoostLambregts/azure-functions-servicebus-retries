@@ -1,7 +1,7 @@
 # Service Bus Trigger Retry Extension
 
 ## Disclaimer
-This package was created as a temporary workaround for issue https://github.com/Azure/azure-service-bus/issues/454. I intend to preserve this package for the foreseeable future, but I am the only preserveer and as such there is a risk involved with depending on this package. If your usecase is for an important project, consider just copying the code from github.
+This package was created as a workaround for issue https://github.com/Azure/azure-service-bus/issues/454. I intend to actively maintain it, but I am the only maintainer which carries inherent risk.
 
 Please read the [limitations](#limitations)
 
@@ -101,7 +101,8 @@ The `sessionOrderingIncrementMs` option (default: 1000ms) controls the time gap 
 Note that the ordering store is in-memory and per-process. This effectively means that ordering is only preserved as long as the consuming instance does not restart. If you'd like this limitation removed, feel free to create an issue.
 
 ## Limitations
-- Cardinality = many is currently not supported.
+- Cardinality = many is not (yet) supported.
+- The session ordering functionality relies on an in-memory data store, and will only work as long as a session stays with the same function instance. When a function instance restarts, ordering is no longer guaranteed.
 - Messages get reposted on Service Bus wrapped in a JSON object. This is unwrapped before being passed to your handler function, but any other consumers on the queue should be modified to expect the wrapped messages.
 
 ## Development
