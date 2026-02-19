@@ -10,6 +10,7 @@ node_modules/
 
 # dotenv environment variables file
 .env
+!emulator/.env
 
 # TypeScript output
 dist
@@ -18,3 +19,10 @@ dist
 junit.xml
 
 .vscode/
+
+# Integration test function app build artifacts
+test/integration/function-app/dist/
+test/integration/function-app/node_modules/
+
+AGENTS.md
+.claude/settings.local.json

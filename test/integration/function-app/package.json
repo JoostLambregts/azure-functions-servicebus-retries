@@ -1,0 +1,18 @@
+{
+  "name": "integration-test-function-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "@azure/service-bus": "^7.9.5",
+    "@joost_lambregts/azure-functions-servicebus-retries": "file:../../.."
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

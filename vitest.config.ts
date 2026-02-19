@@ -19,8 +19,9 @@ export default defineConfig({
       reporter: ['html', 'text', 'text-summary', 'cobertura', 'lcov', 'clover']
     },
     exclude:[
-      ...configDefaults.exclude, 
-      '**/main.ts'
+      ...configDefaults.exclude,
+      '**/main.ts',
+      'test/integration/**'
     ]
   }
 })

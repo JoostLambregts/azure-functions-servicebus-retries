@@ -103,3 +103,77 @@ Note that the ordering store is in-memory and per-process. This effectively mean
 ## Limitations
 - Cardinality = many is currently not supported.
 - Messages get reposted on Service Bus wrapped in a JSON object. This is unwrapped before being passed to your handler function, but any other consumers on the queue should be modified to expect the wrapped messages.
+
+## Development
+
+### Prerequisites
+
+- Node.js ≥ 18
+- [Azure Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local) (`func` on PATH)
+- [Podman](https://podman.io/) with `podman compose` (or Docker with `docker compose`) — required for integration tests
+
+### Install
+
+```bash
+npm install
+```
+
+### Unit tests
+
+Runs ESLint, `tsc --noEmit`, and Vitest with coverage:
+
+```bash
+npm test
+```
+
+To run only Vitest (skip lint and type check):
+
+```bash
+npm run vitest-nolint
+```
+
+### Integration tests
+
+Integration tests spin up a real Service Bus emulator and an Azure Functions host locally.
+
+**1. Start the emulator** (once per dev session)
+
+```bash
+cd emulator
+podman compose up -d
+```
+
+The emulator takes ~30 seconds to become healthy. The test runner waits for it automatically.
+
+**2. Run the integration tests**
+
+```bash
+npm run test:integration
+```
+
+The setup automatically builds the library, installs and builds the test function app, and starts/stops the Azure Functions host around the suite.
+
+**3. Stop the emulator when done**
+
+```bash
+cd emulator
+podman compose down
+```
+
+#### Integration test layout
+
+```
+emulator/
+  docker-compose.yml          # SQL Edge + Service Bus emulator containers
+  Config.json                 # Queue definitions (including session-enabled queue)
+test/integration/
+  function-app/               # Minimal Azure Functions app used as test target
+    src/functions/
+      retryTrigger.ts         # Retry + backoff + DLQ scenarios
+      expiryTrigger.ts        # Message expiry scenarios
+      sessionRetryTrigger.ts  # Session ordering scenarios
+  helpers.ts                  # Shared send/receive/purge utilities
+  retry.test.ts               # Retry, backoff and DLQ tests
+  session-ordering.test.ts    # Session ordering tests
+  vitest.setup.integration.ts # Global setup/teardown
+```
