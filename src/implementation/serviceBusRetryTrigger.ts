@@ -3,7 +3,6 @@ import { type ServiceBusMessage, type ServiceBusSender, ServiceBusClient } from 
 import { MaxRetriesReachedError, MessageExpiredError } from '../util/error.js'
 import { calculateBackoffSeconds, type RetryConfiguration } from './backoff.js'
 import { fromZonedTime } from 'date-fns-tz'
-import { getLatestScheduledTimeForLowerSequence, addScheduledEntry, removeScheduledEntry } from './sessionOrderingStore.js'
 
 
 /**
@@ -17,14 +16,10 @@ import { getLatestScheduledTimeForLowerSequence, addScheduledEntry, removeSchedu
  * @property linearIncreaseSeconds - Optional: The factor by which the delay increases for linear backoff.
  * @property jitter - Optional: The jitter factor to randomize the delay (default: 0.1).
  * @property sendConnectionString - The connection string used to send messages to the Service Bus.
- * @property preserveSessionOrdering - Optional: Whether to preserve session ordering for retries (default: false). If true, messages will be rescheduled to ensure they are processed in sequence.
- * @property sessionOrderingIncrementMs - Optional: The number of milliseconds to increment the scheduled time for retries when preserving session ordering (default: 1000ms). This is used to ensure that retried messages are scheduled after any existing messages with lower sequence numbers.
  * @property preserveExpiresAt - Optional: Whether to preserve the original expiresAtUtc value when rescheduling messages (default: true). If true, the expiresAtUtc value from the original message will be used to calculate the timeToLive for retried messages, ensuring that they expire at the same time as the original message.
  */
 export type ServiceBusRetryConfiguration = RetryConfiguration & {
   sendConnectionString: string
-  preserveSessionOrdering?: boolean
-  sessionOrderingIncrementMs?: number
   preserveExpiresAt?: boolean
 }
 
@@ -32,8 +27,6 @@ export type ServiceBusBindingData = {
   messageId?: string
   enqueuedTimeUtc?: string
   expiresAtUtc?: string
-  sessionId?: string
-  sequenceNumber?: number
 }
 
 
@@ -90,30 +83,17 @@ async function executeWithRetries<T = unknown,S = void>(handler: TypedFunctionHa
     publishCount: context.publishCount
   }
 
-  const preserveSessionOrdering = retryConfiguration.preserveSessionOrdering === true && context.originalBindingData.sessionId !== undefined && context.originalBindingData.sequenceNumber !== undefined
-  const rescheduled = await rescheduleForSessionOrderingIfNeeded(context, wrappedMessage, retryConfiguration, sender)
-  if (rescheduled) {
-    return
-  }
-
   try {
-    const result = await handler(unwrappedMessage, context)
-    if (preserveSessionOrdering) {
-      removeScheduledEntry(context.originalBindingData.sessionId!, context.originalBindingData.sequenceNumber!)
-    }
-    return result
+    return await handler(unwrappedMessage, context)
   } catch {
-    throwErrorIfMaxRetriesReached(retryConfiguration, context, preserveSessionOrdering)
+    throwErrorIfMaxRetriesReached(retryConfiguration, context)
     await resendWithDelay(retryConfiguration, context, wrappedMessage, sender)
   }
 }
 
-function throwErrorIfMaxRetriesReached(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext, preserveSessionOrdering: boolean): void {
+function throwErrorIfMaxRetriesReached(retryConfiguration: ServiceBusRetryConfiguration, context: ServiceBusRetryInvocationContext): void {
   if (context.publishCount > retryConfiguration.maxRetries) {
     context.info(`Max retries (${retryConfiguration.maxRetries}) reached for message originalId / retryId: ${context.originalBindingData?.messageId} / ${context.triggerMetadata?.messageId}`)
-    if (preserveSessionOrdering) {
-      removeScheduledEntry(context.originalBindingData.sessionId!, context.originalBindingData.sequenceNumber!)
-    }
     throw new MaxRetriesReachedError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
   }
 }
@@ -133,13 +113,9 @@ async function resendMessage<T>(retryConfiguration: ServiceBusRetryConfiguration
     body: wrappedMessage,
     contentType: 'application/json',
     scheduledEnqueueTimeUtc: scheduledTime,
-    sessionId: context.originalBindingData.sessionId,
   }
   applyTtlIfNeeded(retryConfiguration, context, serviceBusMessage)
 
-  if (retryConfiguration.preserveSessionOrdering === true && (serviceBusMessage.timeToLive === undefined || serviceBusMessage.timeToLive > 1)) {
-    addScheduledEntry(context.originalBindingData.sessionId!, context.originalBindingData.sequenceNumber!, scheduledTime)
-  }
   context.info(`Rescheduling message. Original messageId: ${context.originalBindingData?.messageId}, tryCount: ${context.publishCount}, scheduledTime: ${scheduledTime.toISOString()}`)
   await sender.scheduleMessages(serviceBusMessage, serviceBusMessage.scheduledEnqueueTimeUtc as Date )
 }
@@ -149,9 +125,6 @@ function applyTtlIfNeeded(retryConfiguration: ServiceBusRetryConfiguration, cont
     const expiryDateTime = fromZonedTime(context.originalBindingData.expiresAtUtc, 'UTC')
     const timeToLive = expiryDateTime.getTime() - Date.now()
     if (timeToLive <= 0) {
-      if (retryConfiguration.preserveSessionOrdering === true && context.originalBindingData.sessionId !== undefined && context.originalBindingData.sequenceNumber !== undefined) {
-        removeScheduledEntry(context.originalBindingData.sessionId, context.originalBindingData.sequenceNumber)
-      }
       throw new MessageExpiredError(context.originalBindingData?.messageId as string, context.triggerMetadata?.messageId as string)
     }
     serviceBusMessage.timeToLive = timeToLive
@@ -170,38 +143,12 @@ function buildRetryInvocationContextAndMessage<T>(originalContext: InvocationCon
   } else {
     unwrappedMessage = message
     context.publishCount = 1
-    const bindingData: ServiceBusBindingData = {
+    context.originalBindingData = {
       messageId: context.triggerMetadata?.messageId as string,
       expiresAtUtc: context.triggerMetadata?.expiresAtUtc as string,
       enqueuedTimeUtc: context.triggerMetadata?.enqueuedTimeUtc as string,
     }
-    if (context.triggerMetadata?.sessionId !== undefined) {
-      bindingData.sessionId = context.triggerMetadata.sessionId as string
-    }
-    if (context.triggerMetadata?.sequenceNumber !== undefined) {
-      bindingData.sequenceNumber = context.triggerMetadata.sequenceNumber as number
-    }
-    context.originalBindingData = bindingData
     context.debug(`SRBLIB: Processing first execution of message with id: ${context.triggerMetadata?.messageId}`)
   }
   return { context, unwrappedMessage }
-}
-
-async function rescheduleForSessionOrderingIfNeeded<T>(context: ServiceBusRetryInvocationContext, wrappedMessage: ServiceBusRetryMessageWrapper<T>, retryConfiguration: ServiceBusRetryConfiguration, sender: ServiceBusSender): Promise<boolean>  {
-  const sessionId = context.originalBindingData.sessionId
-  const sequenceNumber = context.originalBindingData.sequenceNumber
-  const preserveOrdering = retryConfiguration.preserveSessionOrdering === true && sessionId !== undefined && sequenceNumber !== undefined
-  const incrementMs = retryConfiguration.sessionOrderingIncrementMs ?? 1000
-
-  if (preserveOrdering) {
-    const latestLower = getLatestScheduledTimeForLowerSequence(sessionId, sequenceNumber)
-    if (latestLower !== undefined && latestLower > new Date()) {
-      const scheduledTime = new Date(latestLower.getTime() + incrementMs)
-      addScheduledEntry(sessionId, sequenceNumber, scheduledTime)
-      context.info(`SRBLIB: Session ordering: rescheduling message (seq ${sequenceNumber}) after lower-sequence message scheduled at ${latestLower.toISOString()}`)
-      await resendMessage(retryConfiguration, context, wrappedMessage, sender, scheduledTime)
-      return true
-    }
-  }
-  return false
 }

@@ -3,7 +3,7 @@ export type RetryStrategy = 'fixed' | 'exponential' | 'linear'
 export type RetryConfiguration = {
   maxRetries: number               // Maximum number of retry attempts
   retryStrategy?: RetryStrategy    // Type of backoff strategy: 'fixed', 'linear' or 'exponential' (default: 'fixed')
-  delaySeconds: number             // Initial delay in milliseconds between retries (for all strategies)
+  delaySeconds: number             // Initial delay in seconds between retries (for all strategies)
   maxDelaySeconds?: number         // Optional: Maximum delay for exponential backoff (to avoid too long waits)
   exponentialFactor?: number       // Optional: Factor by which delay increases for exponential backoff (default: 2)
   linearIncreaseSeconds?: number   // Optional: Factor by which delay increases for linear backoff
@@ -15,9 +15,9 @@ export function calculateBackoffSeconds(config: RetryConfiguration, retryCount: 
     retryStrategy = 'fixed',
     delaySeconds,
     maxDelaySeconds,
-    linearIncreaseSeconds = 1000,
+    linearIncreaseSeconds = 1,
     exponentialFactor = 2,
-    jitter = 0,
+    jitter = 0.1,
   } = config
 
   let delay

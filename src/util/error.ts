@@ -1,15 +1,3 @@
-export function ensureError(value: unknown): Error {
-  if (value instanceof Error) return value
-
-  let stringified
-  try {
-    stringified = JSON.stringify(value)
-  } catch {
-    stringified = '[Unable to stringify the thrown value]'
-  }
-  return new Error(stringified)
-}
-
 export class CustomError extends Error {
   constructor(message: string, cause?: Error) {
     super(message, { cause })

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-02-23
+
+### Removed
+
+- Session ordering support: `preserveSessionOrdering` and `sessionOrderingIncrementMs` configuration options removed, along with `sessionId` and `sequenceNumber` fields from `ServiceBusBindingData`. Ordering guarantees belong in the Service Bus layer, not in this library.
+
+[2.0.0]: https://github.com/JoostLambregts/azure-functions-servicebus-retries/compare/v1.0.0...v2.0.0
+
 ## [1.0.0] - 2026-02-19
 
 ### Added

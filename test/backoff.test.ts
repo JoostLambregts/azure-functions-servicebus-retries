@@ -7,6 +7,7 @@ describe('calculateBackoffSeconds', () => {
             maxRetries: 5,
             retryStrategy: 'fixed',
             delaySeconds: 1000,
+            jitter: 0,
         }
         const result = calculateBackoffSeconds(config, 3)
         expect(result).toBe(1000)
@@ -18,6 +19,7 @@ describe('calculateBackoffSeconds', () => {
             retryStrategy: 'exponential',
             delaySeconds: 1000,
             exponentialFactor: 2,
+            jitter: 0,
         }
         const result = calculateBackoffSeconds(config, 3)
         expect(result).toBe(8000) // 1000 * 2^3
@@ -30,6 +32,7 @@ describe('calculateBackoffSeconds', () => {
             delaySeconds: 1000,
             exponentialFactor: 2,
             maxDelaySeconds: 5000,
+            jitter: 0,
         }
         const result = calculateBackoffSeconds(config, 3)
         expect(result).toBe(5000) // Capped at maxDelaySeconds
@@ -41,6 +44,7 @@ describe('calculateBackoffSeconds', () => {
             retryStrategy: 'linear',
             delaySeconds: 1000,
             linearIncreaseSeconds: 500,
+            jitter: 0,
         }
         const result = calculateBackoffSeconds(config, 3)
         expect(result).toBe(2500) // 1000 + 500 * 3

@@ -15,16 +15,6 @@
             }
           },
           {
-            "Name": "retry-test-session-queue",
-            "Properties": {
-              "DeadLetteringOnMessageExpiration": true,
-              "DefaultMessageTimeToLive": "PT1H",
-              "LockDuration": "PT1M",
-              "MaxDeliveryCount": 1,
-              "RequiresSession": true
-            }
-          },
-          {
             "Name": "retry-test-expiry-queue",
             "Properties": {
               "DeadLetteringOnMessageExpiration": true,

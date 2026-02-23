@@ -79,7 +79,7 @@ async function startFuncHost(): Promise<void> {
       process.stdout.write(`[func] ${text}`)
 
       // The host logs function names when ready — check accumulated output
-      if (!ready && output.includes('retryTestTrigger') && output.includes('expiryTestTrigger') && output.includes('sessionRetryTestTrigger')) {
+      if (!ready && output.includes('retryTestTrigger') && output.includes('expiryTestTrigger')) {
         ready = true
         clearTimeout(timeout)
         // Give it a moment to fully initialize

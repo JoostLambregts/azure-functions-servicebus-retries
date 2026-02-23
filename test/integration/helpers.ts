@@ -4,7 +4,6 @@ export const EMULATOR_CONNECTION_STRING =
   'Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true'
 
 export const RETRY_QUEUE = 'retry-test-queue'
-export const SESSION_QUEUE = 'retry-test-session-queue'
 export const RESULTS_QUEUE = 'retry-test-results-queue'
 export const EXPIRY_QUEUE = 'retry-test-expiry-queue'
 
@@ -16,12 +15,10 @@ export function createServiceBusClient(): ServiceBusClient {
  * Drain all messages from a queue so tests start with a clean slate.
  * Receives in ReceiveAndDelete mode with a short timeout.
  */
-export async function purgeQueue(queueName: string, options?: { sessionId?: string }): Promise<number> {
+export async function purgeQueue(queueName: string): Promise<number> {
   const client = createServiceBusClient()
   try {
-    const receiver = options?.sessionId
-      ? await client.acceptSession(queueName, options.sessionId, { receiveMode: 'receiveAndDelete' })
-      : client.createReceiver(queueName, { receiveMode: 'receiveAndDelete' })
+    const receiver = client.createReceiver(queueName, { receiveMode: 'receiveAndDelete' })
 
     let total = 0
     let batch: unknown[]

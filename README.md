@@ -11,7 +11,9 @@ When a function execution fails, the message is abandoned and immediately become
 
 There is a github feature request for Azure Service Bus to fix this: https://github.com/Azure/azure-service-bus/issues/454. This issue is years old, and though it is planned to be fixed this year there is no commitment to that timeline.
 
-The purpose of this library is to provide a wrapper around the ```app.serviceBusQueue()``` trigger from the ```@azure/functions``` NodeJS package. The wrapper provides retry functionality with a configruable backoff strategy. The backoff is achieved by rescheduling the messages on Service Bus. 
+The purpose of this library is to provide a wrapper around the ```app.serviceBusQueue()``` trigger from the ```@azure/functions``` NodeJS package. The wrapper provides retry functionality with a configruable backoff strategy. The backoff is achieved by rescheduling the messages on Service Bus. Once the configured maximum number of retries is reached, the function will throw a ```MaxRetriesReachedError``` error, leading to the message being abandoned. From there, Service Bus will handle it as normal, potentially sending the message to a DLQ.
+
+Since this library takes over retry functionality from Service Bus, retries in Service Bus should be disabled by setting MaxDeliveryCount = 1.
 
 The message will be republished in a json wrapper, with additional context about the original message as well as a republish count.
 
@@ -26,8 +28,6 @@ type ServiceBusBindingData = {
   messageId?: string
   enqueuedTimeUtc?: string
   expiresAtUtc?: string
-  sessionId?: string
-  sequenceNumber?: number
 }
 ```
 
@@ -77,8 +77,6 @@ type ServiceBusRetryConfiguration = {
   jitter?: number;                     // Optional: jitter factor to randomize delay (default: 0.1)
   sendConnectionString: string;        // Connection string for republishing messages to service bus.
   preserveExpiresAt?: boolean;         // Optional: preserve original TTL on retried messages (default: true). See Message expiry chapter.
-  preserveSessionOrdering?: boolean;   // Optional: Preserve message ordering within sessions (default: false). See Session ordering chapter.
-  sessionOrderingIncrementMs?: number; // Optional: Gap in ms between ordered session messages (default: 1000)
 }
 ```
 
@@ -89,21 +87,10 @@ By default (`preserveExpiresAt: true`), the library sets the `timeToLive` on res
 
 Set `preserveExpiresAt: false` to disable this behavior. When disabled, no `timeToLive` is set on rescheduled messages, meaning they will use the queue's default TTL.
 
-## Session ordering
-When sessions are enabled on a Service Bus queue, message ordering within a session matters. The retry mechanism (complete + reschedule with delay) can break this ordering because subsequent messages in the session may be processed while a failed message waits for its retry.
-
-To preserve ordering, set `preserveSessionOrdering: true` in the retry configuration. When enabled, the library tracks scheduled retry messages per session in an in-memory store. Incoming messages check whether a lower-sequence message in the same session is already scheduled for retry. If so, the incoming message is rescheduled to run after it, preserving order.
-
-Session ordering only activates when `preserveSessionOrdering` is `true` **and** the trigger metadata contains both `sessionId` and `sequenceNumber` (i.e., the queue has sessions enabled).
-
-The `sessionOrderingIncrementMs` option (default: 1000ms) controls the time gap between ordered messages when rescheduling.
-
-Note that the ordering store is in-memory and per-process. This effectively means that ordering is only preserved as long as the consuming instance does not restart. If you'd like this limitation removed, feel free to create an issue.
-
 ## Limitations
 - Cardinality = many is not (yet) supported.
-- The session ordering functionality relies on an in-memory data store, and will only work as long as a session stays with the same function instance. When a function instance restarts, ordering is no longer guaranteed.
 - Messages get reposted on Service Bus wrapped in a JSON object. This is unwrapped before being passed to your handler function, but any other consumers on the queue should be modified to expect the wrapped messages.
+- Rescheduling messages changes message ordering. Do not use this library when message ordering is important, in for instance when using sessions. Version 1.0 of this library included functionality to preserve message ordering by rescheduling out of order messages. This was misguided, and was removed in version 2.0. It will not be implemented again.
 
 ## Development
 
@@ -166,15 +153,13 @@ podman compose down
 ```
 emulator/
   docker-compose.yml          # SQL Edge + Service Bus emulator containers
-  Config.json                 # Queue definitions (including session-enabled queue)
+  Config.json                 # Queue definitions
 test/integration/
   function-app/               # Minimal Azure Functions app used as test target
     src/functions/
       retryTrigger.ts         # Retry + backoff + DLQ scenarios
       expiryTrigger.ts        # Message expiry scenarios
-      sessionRetryTrigger.ts  # Session ordering scenarios
   helpers.ts                  # Shared send/receive/purge utilities
   retry.test.ts               # Retry, backoff and DLQ tests
-  session-ordering.test.ts    # Session ordering tests
   vitest.setup.integration.ts # Global setup/teardown
 ```
